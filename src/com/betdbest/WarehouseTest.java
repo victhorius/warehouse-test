@@ -16,7 +16,12 @@ import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.Collections;
 import java.util.Comparator;
+import java.util.HashMap;
+import java.util.Iterator;
 import java.util.List;
+import java.util.Map;
+import java.util.Objects;
+import java.util.Set;
 import java.util.function.Consumer;
 import java.util.function.Function;
 import java.util.stream.Collectors;
@@ -460,11 +465,11 @@ public class WarehouseTest {
 			}
 
 			BoxType boxType = findBestBoxType(order);
-			
+
 			if (boxType == null) {
 				System.out.println("Error finding box");
 			}
-			
+
 			ShipmentInfo info = findBestRoute(availableWarehouses, order, boxType);
 
 			if (info == null)
@@ -477,6 +482,180 @@ public class WarehouseTest {
 
 		private ShipmentInfo findBestRoute(List<Warehouse> warehouses, Order order, BoxType box)
 				throws NoSuitableWarehouseException {
+
+			// Comparing shipping cost for each warehouse
+			HashMap<Warehouse, Float> priceByWarehouse = new HashMap<>();
+			ArrayList<Float> priceList = new ArrayList<>();
+
+			for (Warehouse warehouse : warehouses) {
+				Float shippingPrice = getShippingPriceByWareHouse(warehouse, order, box);
+				priceByWarehouse.put(warehouse, shippingPrice);
+				priceList.add(shippingPrice);
+			}
+
+			// Sorting the prices
+			Collections.sort(priceList);
+
+			// Getting possible warehouses with the same shipping cost
+			Float shippingPrice = priceList.get(0);
+			Set<Warehouse> warehouseByPrice = getKeysByValue(priceByWarehouse, shippingPrice);
+
+			Warehouse selectedWarehouse = null;
+			if (warehouseByPrice.size() != 1) {// check warehouse with biggest stock
+
+				// Only leaves the selected warehouses
+				selectedWarehouse = compareWarehouseByStock(warehouseByPrice, order);
+
+			} else {
+				selectedWarehouse = getSelectedWareHouse(warehouseByPrice);
+
+			}
+
+			String targetState = order.getTargetState();
+
+			//Possible departure dates for that warehouse
+			List<DepartureTime> departures = this.departures;
+			DepartureTime departureTime = getPossibleDepartureTime(departures, selectedWarehouse, targetState);
+
+			// Getting CarrierTimes
+			List<CarrierTime> times = this.times;
+			CarrierTime carrierTime = getPossibleCarrierTimes(times, selectedWarehouse, targetState);
+
+			//Getting the possible guaranteedDeliveryDate, we send ASAP
+			ArrayList<LocalDateTime> possibleDeliveryDates = new ArrayList<>();
+			for (ShippingHour shippingHour : departureTime.getShippingHours()) {
+				LocalDateTime dDT = getDeliveryDateTime(order.getOrderDate(), shippingHour, carrierTime);
+				possibleDeliveryDates.add(dDT);
+			}
+
+			// sending ASAP
+			Collections.sort(possibleDeliveryDates);
+
+			LocalDateTime guaranteedDeliveryDate = possibleDeliveryDates.get(0);
+			ShipmentInfo info = new ShipmentInfo(order, selectedWarehouse, guaranteedDeliveryDate, box.getBoxType(), shippingPrice);
+
+			return info;
+		}
+
+		/**
+		 * Removes warehouses from set with the same price, only leaves the one with the
+		 * biggest stock
+		 * 
+		 * @param warehouseByStock
+		 * @param order
+		 * @return
+		 */
+		private Warehouse compareWarehouseByStock(Set<Warehouse> warehouseByStock, Order order) {
+
+			HashMap<Warehouse, Integer> hmStockByWarehouse = new HashMap<>();
+			ArrayList<Integer> stockList = new ArrayList<>();
+
+			Iterator<Warehouse> iterator = warehouseByStock.iterator();
+
+			while (iterator.hasNext()) {
+				Warehouse wh = iterator.next();
+				int stockByWarehouse = getStockByWarehouse(wh, order);
+				stockList.add(stockByWarehouse);
+				hmStockByWarehouse.put(wh, stockByWarehouse);
+			}
+
+			Collections.sort(stockList);
+
+			// Getting possible warehouses with the same stock
+			Integer biggestStock = stockList.get(stockList.size() - 1);
+			warehouseByStock = getKeysByValue(hmStockByWarehouse, biggestStock);
+
+			return getSelectedWareHouse(warehouseByStock);
+		}
+
+		/**
+		 * Gets the stock from a specific warehouse and order
+		 * 
+		 * @param warehouse
+		 * @param order
+		 * @return
+		 */
+		private int getStockByWarehouse(Warehouse warehouse, Order order) {
+			int stock = 0;
+			List<Stock> stocks = this.stocks;
+
+			for (Stock st : stocks) {
+				if (st.getWarehouse().equals(warehouse) && st.getItemId().equals(order.getItemId())) {
+					return st.getStock();
+				}
+			}
+
+			return stock;
+		}
+
+		private CarrierTime getPossibleCarrierTimes(List<CarrierTime> times, Warehouse selectedWarehouse,
+				String targetState) {
+			for (CarrierTime carrierTime : times) {
+				if (carrierTime.getWarehouse().equals(selectedWarehouse)
+						&& carrierTime.getTargetState().equals(targetState)) {
+					return carrierTime;
+				}
+			}
+			return null;
+		}
+
+		/**
+		 * Gets the DepartureTime from an specific Warehouse and target state
+		 * 
+		 * @param departures
+		 * @param selectedWarehouse
+		 * @param targetState
+		 * @return
+		 */
+		private DepartureTime getPossibleDepartureTime(List<DepartureTime> departures, Warehouse selectedWarehouse,
+				String targetState) {
+
+			for (DepartureTime departureTime : departures) {
+				if (departureTime.getWarehouse().equals(selectedWarehouse)
+						&& departureTime.getTargetState().equals(targetState)) {
+					return departureTime;
+				}
+			}
+			return null;
+		}
+
+		/**
+		 * Gets the selected warehouse for shipping the product
+		 * 
+		 * @param kiesByValues
+		 * @return
+		 */
+		private Warehouse getSelectedWareHouse(Set<Warehouse> kiesByValues) {
+			return kiesByValues.stream().findFirst().get();
+		}
+
+		public static <T, E> Set<T> getKeysByValue(Map<T, E> map, E value) {
+			return map.entrySet().stream().filter(entry -> Objects.equals(entry.getValue(), value))
+					.map(Map.Entry::getKey).collect(Collectors.toSet());
+		}
+
+		/**
+		 * Gets shipping cost / dm3 of from warehouse, order target state and box type
+		 * 
+		 * @param warehouse
+		 * @param order
+		 * @param box
+		 * @return
+		 */
+		private Float getShippingPriceByWareHouse(Warehouse warehouse, Order order, BoxType box) {
+
+			CarrierPricing selectedPricing = null;
+			for (CarrierPricing pricing : this.pricings) {
+				if (pricing.getWarehouse().equals(warehouse)
+						&& pricing.getTargetState().equals(order.getTargetState())) {
+					selectedPricing = pricing;
+					break;
+				}
+			}
+
+			if (selectedPricing != null) {
+				return selectedPricing.getVolumePrice() * box.getVolume();
+			}
 			return null;
 		}
 
@@ -491,43 +670,41 @@ public class WarehouseTest {
 		 */
 		private BoxType findBestBoxType(Order order) throws NoSuitableBoxException {
 
-			// Depende del producto
-			// Order:
-//        final long orderId;
-//        final LocalDateTime orderDate;
-//        final String itemId;
-//        final String targetState;
-
-			// Recuperamos el item de la orden
-			Item itemForBox = null;
-			for (Item item : this.items) {
-				if (item.getItemId().equals(order.getItemId())) {
-					itemForBox = item;
-					break;
-				}
-			}
-
-			// Controlar nullpointer
-
-			// Recuperamos el tipo de caja
+			// Getting item from order
+			String itemId = order.getItemId();
+			Item itemForBox = getItemFromOrder(itemId);
 
 			List<BoxType> possibleWeightBoxes = new ArrayList<>();
 
-			// Comprobamos que caja aguanta el peso
+			// Check the box can hold item weight
 			for (BoxType boxType : this.boxTypes) {
 				if (itemForBox.getWeight() <= boxType.getMaxWeight()) {
 					possibleWeightBoxes.add(boxType);
 				}
 			}
 
-			// Comprobamos que caja es la minima donde entra
+			// Check if the item fits in the box
 			for (BoxType boxType : possibleWeightBoxes) {
-
 				if (fitsInBox(itemForBox, boxType)) {
-				return	boxType;
+					return boxType;
 				}
 			}
 
+			return null;
+		}
+
+		/**
+		 * Gets the item by its ID
+		 * 
+		 * @param itemId
+		 * @return
+		 */
+		private Item getItemFromOrder(String itemId) {
+			for (Item item : this.items) {
+				if (item.getItemId().equals(itemId)) {
+					return item;
+				}
+			}
 			return null;
 		}
 
@@ -565,13 +742,16 @@ public class WarehouseTest {
 			return true;
 		}
 
-		// Comprobar que es redundante si ya hemos ordenado la dimension de las cajas
-		// ???¿?¿?¿?¿?
-		// TODO
-		private Boolean checkDimension(Integer firstDimension, List<Integer> boxDimensions) {
-
+		/**
+		 * Check if dimension fits into the available box dimensions
+		 * 
+		 * @param dimension
+		 * @param boxDimensions
+		 * @return
+		 */
+		private Boolean checkDimension(Integer dimension, List<Integer> boxDimensions) {
 			for (Integer boxDimension : boxDimensions) {
-				if (firstDimension > boxDimension) {
+				if (dimension > boxDimension) {
 					return false;
 				}
 			}
